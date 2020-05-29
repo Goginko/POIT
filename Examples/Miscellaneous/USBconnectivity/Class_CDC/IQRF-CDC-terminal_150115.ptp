@@ -1,0 +1,101 @@
+VERSION
+8
+
+COMMSETTINGS
+0
+COM6
+COM2
+9600
+2
+0
+4
+0
+0
+
+COMMDISPLAY
+0
+
+SEND
+0
+Reset USB Device
+3E 52 0D
+0
+5
+
+SEND
+1
+Reset TR Module
+3E 52 54 0D
+0
+5
+
+SEND
+2
+Get USB Device Info
+3E 49 0D
+0
+5
+
+SEND
+3
+Get TR Module Info
+3E 49 54 0D
+0
+5
+
+SEND
+4
+Connectivity Indication
+3E 42 0D
+0
+5
+
+SEND
+5
+Get Status
+3E 53 0D
+0
+5
+
+SEND
+6
+Send Data
+3E 44 53 02 3A 53 30 0D
+0
+5
+
+SEND
+7
+Switch to USB Custom Class
+3E 55 0D
+0
+5
+
+SEND
+8
+Switch to USB CDC - UART mode
+3E 55 55 0D
+0
+5
+
+SEND
+9
+Switch to USB CDC - SPI mode
+3E 55 53 0D
+0
+5
+
+SEND
+10
+test
+3E 0D
+0
+5
+
+SEND
+11
+Switch to USB CDC - IQRF mode
+2A 2A 2A
+0
+5
+

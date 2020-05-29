@@ -1,0 +1,321 @@
+// *********************************************************************
+//   Custom DPA Handler code example - PIR controlled lighting demo    *
+// *********************************************************************
+// Copyright (c) IQRF Tech s.r.o.
+//
+// File:    $RCSfile: CustomDpaHandler-PIRlighting.c,v $
+// Version: $Revision: 1.23 $
+// Date:    $Date: 2020/02/20 17:18:58 $
+//
+// Revision history:
+//   2017/03/13  Release for DPA 3.00
+//   2015/08/05  Release for DPA 2.20
+//
+// *********************************************************************
+
+// Online DPA documentation https://doc.iqrf.org/DpaTechGuide/
+
+// Default IQRF include (modify the path according to your setup)
+#include "IQRF.h"
+
+// Default DPA header (modify the path according to your setup)
+#include "DPA.h"
+// Default Custom DPA Handler header (modify the path according to your setup)
+#include "DPAcustomHandler.h"
+
+// This is an example of PIR controlled lighting. The application can be configured and controlled by EEPROM and RAM DPA peripherals respectively.
+// 
+// When a PIR input is active the device sends non-network Peer2Peer packet that contains the address of the device.
+// PIR input is then inactive for next PIRdelay seconds in order not to jam with many same packets.
+// Other nodes that receive the Peer2Peer packet will set the LIGHT output if the address of the sender matches any of the condition bytes 
+// from the 16 byte long list stored at EEPROM peripheral from address 1. The light will stay on for number of second stored at EEPROM peripheral at address 0.
+// Condition bytes:
+//  0         End of the condition bytes list
+//  255       Any node will switch the light on. This condition byte overrides condition bytes described below.
+//  1 - 239   Only node having address equal this value switches the light on.
+//  240 - 254 Only node having address that differs ( ConditionByte - 239 ) from my address maximum switches the light on. 
+//            E.g. when my address is 10 and condition byte is 241, then only nodes with address 8-12 would switch my light on.
+//
+// If bit PeripheralRam[0].0 is set, PIR input is inactive. This allows to disable PIR detectors e.g. during the day.
+//
+// ! Please not that Peer2Peer packets must be enabled at the HWP configuration
+// This example works only at STD mode, not at LP mode
+
+// Initialize the EEPROM peripheral area
+#pragma cdata[ __EESTART + PERIPHERAL_EEPROM_START ] = \
+  /* Set light timeout to 5 seconds. */ \
+  5, \
+  /* Allow switching the light on only by nodes with address 1 and address 2 and with address that differs 2 maximum. */ \
+  1, 2, MAX_ADDRESS + 2, \
+  /* End of the list. */ \
+  0
+// Note: symbol MAX_ADDRESS equals 239
+
+//############################################################################################
+
+// PIR input
+#define	PIR	  buttonPressed
+// Light output
+#define	LIGHT _LEDG
+
+// Fixed PIR repetition delay [s]
+#define	PIRdelay	2
+
+//############################################################################################
+
+// Length of the address list
+#define	ADDR_LIST_LEN 16
+
+// 40 ms counter used to measure 1 s
+static uns8 tmrCounter40ms;
+
+// Light on counter
+static uns8 lightTimeout;
+
+// Initial light timeout counter value, read from EEPROM peripheral at address 0
+static uns8 lightTimeoutSetting;
+
+// Switches the light on, initializes timeout 
+void LightOn();
+// Starts new second
+void StartSecond();
+
+// Must be the 1st defined function in the source code in order to be placed at the correct FLASH location!
+//############################################################################################
+bit CustomDpaHandler()
+//############################################################################################
+{
+  // Handler presence mark
+  clrwdt();
+
+  // Place for local static variables used only within CustomDpaHandler() among more events
+
+  // If TRUE, PIR was activated and after timeout
+  static bit PIRactivated;
+
+  // Detect DPA event to handle
+  switch ( GetDpaEvent() )
+  {
+    // -------------------------------------------------
+    case DpaEvent_Interrupt:
+      // Do an extra quick background interrupt work
+      // ! The time spent handling this event is critical.If there is no interrupt to handle return immediately otherwise keep the code as fast as possible.
+      // ! Make sure the event is the 1st case in the main switch statement at the handler routine.This ensures that the event is handled as the 1st one.
+      // ! It is desirable that this event is handled with immediate return even if it is not used by the custom handler because the Interrupt event is raised on every MCU interrupt and the "empty" return handler ensures the shortest possible interrupt routine response time.
+      // ! Only global variables or local ones marked by static keyword can be used to allow reentrancy.
+      // ! Make sure race condition does not occur when accessing those variables at other places.
+      // ! Make sure( inspect.lst file generated by C compiler ) compiler does not create any hidden temporary local variable( occurs when using division, multiplication or bit shifts ) at the event handler code.The name of such variable is usually Cnumbercnt.
+      // ! Do not call any OS functions except setINDFx().
+      // ! Do not use any OS variables especially for writing access.
+      // ! All above rules apply also to any other function being called from the event handler code, although calling any function from Interrupt event is not recommended because of additional MCU stack usage.
+
+      // PIR timeout counter
+      static uns8 PIRtimeout;
+
+      //  If TMR6 interrupt occurred
+      if ( TMR6IF )
+      {
+        // Unmask interrupt
+        TMR6IF = 0;
+        // Decrement count
+        if ( --tmrCounter40ms == 0 )
+        {
+          // 1 s is over
+          StartSecond();
+
+          // Decrement PIR counter
+          if ( PIRtimeout != 0 )
+            PIRtimeout--;
+
+          // Decrement light counter
+          if ( lightTimeout != 0 )
+          {
+            lightTimeout--;
+            if ( lightTimeout == 0 )
+              // Switch off the light
+              LIGHT = 0;
+          }
+        }
+      }
+
+      // Last state of PIR input
+      static bit lastPIR;
+
+      // PIR is on?
+      if ( PIR )
+      {
+        // Was PIR off and PIR timeout is over and not disabled?
+        if ( !lastPIR && PIRtimeout == 0 && !PeripheralRam[0].0 )
+        {
+          // Initializes PIR timeout counter
+          PIRtimeout = PIRdelay;
+          // PIR is activated
+          PIRactivated = TRUE;
+        }
+
+        lastPIR = TRUE;
+      }
+      else
+        lastPIR = FALSE;
+
+DpaHandleReturnTRUE:
+      return TRUE;
+
+      // -------------------------------------------------
+    case DpaEvent_Idle:
+      // Do a quick background work when RF packet is not received
+
+      // PIR was activated, send the P2P packet
+      if ( PIRactivated )
+      {
+        // Note: Here Listen before Talk technique should be implemented to avoid collisions
+
+        // PIR not activated any more
+        PIRactivated = FALSE;
+
+        // Save RF settings and set new ones
+        setNonetMode();
+        setRFmode( _TX_STD | _STDL );
+
+        // Prepare P2P packet
+        // Header
+        bufferRF[0] = 'P';
+        // Address
+        bufferRF[1] = ntwADDR;
+        // Packet length
+        DLEN = 2;
+        PIN = 0;
+        // Transmit the prepared packet
+        RFTXpacket();
+
+        // Restore RF settings
+        DpaApiSetRfDefaults();
+        setNodeMode();
+
+        LightOn();
+      }
+
+      break;
+
+      // -------------------------------------------------
+    case DpaEvent_PeerToPeer:
+      // Called when peer-to-peer (non-networking) packet is received
+
+      // Note: peer-to-peer packet should be better protected when not used at this example
+
+      // Is my peer-to-peer packet (check length and content)?
+      if ( DLEN == 2 && bufferRF[0] == 'P' )
+      {
+        // Read list of condition bytes from EEPROM[1..x]
+        eeReadData( PERIPHERAL_EEPROM_START + 1, ADDR_LIST_LEN );
+        // Force list end
+        bufferINFO[ADDR_LIST_LEN] = 0;
+        // Pointer before 1st address
+        FSR0 = bufferINFO - 1;
+        // Loop the list
+        while ( *++FSR0 != 0 )
+        {
+          // Any address or address match?
+          if ( *FSR0 == 0xff || *FSR0 == bufferRF[1] )
+          {
+            LightOn();
+            break;
+          }
+
+          if ( *FSR0 > MAX_ADDRESS )
+          {
+            // Compute absolute address difference
+            int8 addrDiff = bufferRF[1] - ntwADDR;
+            if ( addrDiff < 0 )
+              addrDiff = -addrDiff;
+
+            // Get maximum difference
+            uns8 absDelta = *FSR0 - MAX_ADDRESS;
+            // Is max. difference met?
+            if ( (uns8)addrDiff <= absDelta )
+            {
+              LightOn();
+              break;
+            }
+          }
+        }
+      }
+
+      break;
+
+      // -------------------------------------------------
+    case DpaEvent_Init:
+      // Do a one time initialization before main loop starts
+
+      // Setup TMR6 to generate ticks on the background (ticks every 10ms)
+#if F_OSC == 16000000
+      PR6 = 250 - 1;
+      T6CON = 0b0.1001.1.11;	// Prescaler 64, Postscaler 10, 64 * 10 * 250 = 160000 = 4MHz * 40ms
+#else
+#error Unsupported oscillator frequency
+#endif
+
+      TMR6IE = TRUE;
+
+      // Initialize 1 s timer
+      StartSecond();
+
+RefreshLightDelay:
+      // Read light delay from EEPROM[0]
+      lightTimeoutSetting = eeReadByte( PERIPHERAL_EEPROM_START + 0 );
+      break;
+
+      // -------------------------------------------------
+    case DpaEvent_Notification:
+      // Called after DPA request was processed and after DPA response was sent
+
+      // Anything written to the EEPROM?
+      // (could be optimized by checking the EEPROM address that was written to)
+      if ( _PNUM == PNUM_EEPROM && _PCMD == CMD_EEPROM_WRITE )
+        goto RefreshLightDelay;
+
+      break;
+
+      // -------------------------------------------------
+    case DpaEvent_AfterSleep:
+      // Called on wake-up from sleep
+      TMR6IE = TRUE;
+      TMR6ON = TRUE;
+      break;
+
+      // -------------------------------------------------
+    case DpaEvent_BeforeSleep:
+      // Called before going to sleep	(the same handling as DpaEvent_DisableInterrupts event)
+
+      // -------------------------------------------------
+    case DpaEvent_DisableInterrupts:
+      // Called when device needs all hardware interrupts to be disabled (before Reset, Restart, LoadCode, Remove bond, and Run RFPGM)
+      // Must not use TMR6 any more
+      TMR6ON = FALSE;
+      TMR6IE = FALSE;
+      break;
+  }
+
+  return FALSE;
+}
+
+//############################################################################################
+void LightOn()
+//############################################################################################
+{
+  lightTimeout = lightTimeoutSetting;
+  LIGHT = 1;
+  StartSecond();
+}
+
+//############################################################################################
+void StartSecond()
+//############################################################################################
+{
+  tmrCounter40ms = 1000 / 40;
+}
+
+//############################################################################################
+// Default Custom DPA Handler header; 2nd include to implement Code bumper to detect too long code of the Custom DPA Handler (modify the path according to your setup) 
+#include "DPAcustomHandler.h"
+//############################################################################################
